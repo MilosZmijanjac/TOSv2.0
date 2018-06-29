@@ -1,0 +1,159 @@
+start.asm - Bootstrap sa multiboot zaglavljem, ima vanjsku povezanost sa irq.asm, isrs.asm, process.asm
+	  - Sluzi nam za inicijalizaciju OS, inicijalizaciju GDT-a, IDT-a, segment registara, steka-a itd
+          - nasm -felf32 start.asm -o start.o
+
+GDT       - Global Descriptor Table
+	  - Posebna struktura podataka zaduzena za definisanje segmenata memorije, tj njihove velicine, 
+            pocetne adrese, privilegija itd
+          - Posto bootloader sam definise svoj GDT koji nam nije dostupan za prepravku, prepravka baca triple exception
+            mi cemo napisati svoj GDT i smjestiti ga u memoriju na zeljenu lokaciju
+	  - Segment registri su: CS,DS,ES,GS,FS,SS
+	  - CS-Code Segment govori koliki je offset do mjesta gdje se nalaze privilegije za rad sa izvrsnim kodom
+	  - DS-Data Segment isto kao i CS samo u odnosu na podatke
+	  - Predstavlja listu sa 64-bitnim clanovima-deskriptorima	
+	  - Svaki deskriptor definise gdje pojedini memorijski segment pocinje, koliko je dugacak, koji je tip, koja je privilegija 
+	    i u kom se prstenu nalazi ako se radi o procesoru koji radi u protected mode-u
+	  - Prsten predstavlja nivo slobode koja je pruzena za rad sa resursima - imaju tri nivoa-prstena
+		-Nivo 0 - kernel mode- najveci pristup resursima- interrupt handlers- su na ovom nivou
+		-Nivo 1,2 - Driver-Hardware mode
+		-Nivo 3 - Userspace	
+	  - Kreiracemo gdt sa tri clana i to jedan koji ce biti NULL da bi procesor ynao da radimo u protected mode-u, drugi za CS i treci za DS
+	  - Da bi procesor znao gdje se nas GDT nalazi u start.asm pomocu instrukcije lgdt kojoj prosledjujemo pokazivac na nas GDT _gp
+	  - gdt_flush() - funkcija koja ce pomocu pokazivaca _gp reci procesoru gdje se nas GDT nalazi
+	  - gdt_set_gate() - funkcija koja setuje deskriptor
+          - gdt_install() - funkcija koja instalira nas GDT, poziva se iz main-a i treba da bude prva funkcija koja se poziva, jer bez GDT nema nicega
+ 	  - GDT radi na principu segmentacije koji se pokazao neefikasan jer prilikom unosa u memoriju mora se definisati kolika je velicina
+
+ISR	  - Interrupt Service Routine
+  	  - Sluze da sacuvaju trenutno stanje procesora i da setuju odgovarajuce segment registre  koji su potrebni u kernel mode-u prije poziva odgovarajuceg 
+	    interrupt handler-a	 
+	  - Interrupt - prekid procesora
+	  - Exception - pojava kada procesor ne moze da nastavi sa normalnim radom
+	  - General Protection Fault - nastaje kada program zeli da pristupi onom dijelu memorije koja mu nije dozvoljena	
+	  - IRQ - Interrupt Requests - prekidi na nivou hardware-a
+	  - isrs_install() - funkcija koja instalira nase ISR poziva se iz main-a
+
+IDT       - Interrupt Descriptor Table
+	  - Govori procesoru koji ISR treba da pozove za odredjeni interrupt
+	  - Po strukturi je dosta slicna GDT-u samo sto za razliku od GDT-a kod koga deskriptor pokazuje na memorijsku lokaciju,, kod IDT on pokazuje na IRS
+
+IRQ       - Prekidi uyrokovani hardware-om
+	  - irq_install() - instalira nas IRQ
+	  - irq_handler() - nas handler
+	  - irq_unistall() - deinstalira IRQ
+
+PIT	  - Programmable Interval Timer
+	  - Koristan je kod generisanja prekida
+	  - To je cip koji se sastoji od tri kanala, kanal 0 mapira IRQ, kanal 1 specificnost sistema, kanal 2 upucuje zvucni signal
+	  - Za pravilan rad potreban je samo kanal 0
+	  - Zaduzen je za brzinu reagovanja IRQ0
+ 	  - timer_handler() 
+	  - timer_install()
+
+KEYBOARD  - Omoguceno prepoznavanje znakova unesenih sa tastature i generisanja odgovarajucih IRQ
+	  - Na nasem sistemu prisutan je US layout
+
+PAGGING   - Sluzi kao zastita memorije i kao sama virtuelna memorija
+	  - Programi koji se izvrsavaju imaju jedino pristum virtuelnom adresnom prostoru.Dio tog prostora se mapira a dio unmap-ira. U slucaju da program ima 
+	    zelju da pristupi prostori koji je unmap-iran dolazi do Page Fault-a OS hvata taj Fault i salje signal SIGSEGV a zatim signal SIGKILL
+	  - Pagging dijeli virtuelni adresni prostor na blokove jednake velicine
+	  - Blok se naziva page
+	  - Kasnije se page moze mapirati u fizicku mmoriju u blokove koji ze nazivaju frame-ovi
+	  - MMU - Memory Management Unit - sloj koji se nalazi izmedju CPU i memorije i upravlja segmentation-om i pagging-om
+	  - Page Fault - prekid koji nastaje kad program zeli da pristupi nom dijelu memorije koja mu nije dostupna ili kad je page table ostecen
+          - Posto nam za pagging treba heap, a nacin na koji mi inace implementujemo heap je putem dinamicke alokacije koju ne moyemo da implementujemo moracemo da 		    implicitno alociramo dio memorije za kernel heap 
+	  - Prilikom alokacije page tabele i direktorijuma potrebno je izvrsiti poravnanje
+	  - Da bi se pristupilo Page table-u page directory mora da sadrzi fizicke adrese, a ne virtuelne. Metoda kojom se ovo obezbedjuje je metoda dva niza, u jednom 	    nizu se nalaze viruelne adrese, a u drugom fizicke
+	  - Da bi mogli da alociramo frame moramo znati koji je frame slobodan, a to postizemo tako sto cemo da vodimo evidenciju slobodnih frame-ova pomocu bitset-a
+
+HEAP      - Dinamicka alokacija je potrebna svakom sistemu
+	  - Dinamicka alokacija na nivou pagginga je efikasna u smislu vremena potrosenog na alokaciju, ali problem kod tog alociranje je nemogucnost da se taj 	    memorijski prostor oslobodi, sto bi dovelo do toga da se memorija potrosi
+	  - Svaka struktura podataka koja se moye alocirati i dealocirati dinamicki moze da predstavlja heap
+	  - U trenutnoj verziji OS-a koristimo uredjeni niz kao strukturu za nas heap
+  	  - Citava struktura se zasniva na blokovima i na 'rupama'
+	  - Blok je dio memorije koja je alocirana i koja je trenutno u upotrebi, hole je dio memorije koji nije u upotrebi
+	  - Svaki blok i hole imaju svoj deskripto i index koji se cuva u tabeli koja je sortirana rastuce po  velicini memorije koju zauzimaju
+	  - Svaki blok i hole sadrzi svoj header i footer 
+	  - Header sadrzi vecinu podataka o bloku/hole-u dok se u footeru najcesce samo nalazi pokazivac na header
+
+ALOKACIJA - Postupak alociranja:
+              1. Pretrazujemo tabelu indexa i pronalazimo najmanji hole dovoljno velik da moze da primi trazenu velicnu
+	         1.1 U slucaju da nismo pronasli hole koji moze da uskladisti zeljenu kolicinu, izvrsavamo sledece:
+			- Prosirimo heap
+			- Ako je tabela indexa prazna dodamo novi index
+			- Ako nije prazna onda podesavamo header poslednjeg u uredjenom nizu, povecamo njegovu velicinu i podesimo footer
+	      2. Ispitamo da li je potrebno da hole podijelimo na dva dijela u slucaju da nam druga polovina ne treba i ako se u tu polovinu mogu uklopiti header i 
+	    	 footer
+	      3. Ako je potrebno da se izvrsi poravnjanje page-a onda mora da se promijeni adresa bloka i kreira novi hole gdje ce taj blok da se smjesti, a ako nije 
+		 onda samo obrisemo index hole-a iz tabele
+	      4. Upisemo novi header i footer bloka
+	      5. Ako je potrebno podijeliti hole podijelimo ga i upisemo index u tabelu
+	      6. Vratimo pokazivac na blok+velicinu header-a
+
+DEALOKACIJA- Dealokacija je slozenija od alokacije iz razloga sto mi ne mozemo da prevedemo blok u hole jer u alokaciji moze da dodje do promjene velicine pocetnog 
+	     hole-a     
+	   - Postupak dealokacije:
+		1. Lociramo header bloka kojeg dealociramo pointer-size_of_header
+		2. Setujemo ishole flag na 1
+		3. Vrsimo stapanje blokova: Ako je sa ljeve strane footer setujemo flagove footera tog bloka i header-a pocetnog bloka na 0 i dobija se blok velicine
+		   pocetnog bloka i bloka sa lijeve strane, ako se sa desne strane nalazi header vrsimo stapanje sa desne strane
+		4. Ako je footer zadnji u heap/u ne radimo nista
+		5. Unesemo header u index tabelu
+
+VFS	   - Virtual File System
+	   - Predstavlja abstrakciju fizickog fajl sistema u radnoj memoriji
+	   - Najcesce se implemntuje preko grafova, jedan cvor jedan fajl
+	   - Fajl sistem treba da omoguci rad sa fajlovima u vidu kreiranja novih  fajlova, otvaranje i zatvaranje fajlova, brisanje fajlova, citanje i pisanje u fajlove
+	   - Mountpoint- mjesto gdje se mount-uje fajl sistem, mountuje se tako sto se odgovarajucem root direktorijumu dodijeljuje pokazivac na pocetak tj korijen fajl 
+	     sistema
+
+INTRAMDISK - Initial Ram Disk 
+	   - Predstavlja fajl sistem koji se ucitava prije standardnog fajl sistema
+	   - Sluzi za skladistenje drajvera
+	   - Mora da se spesifikuje u multiboot.h tj u modul bootstrapa
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
